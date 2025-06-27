@@ -1,0 +1,73 @@
+import numpy as np
+import torch
+from torch_geometric.data import Data
+from math import pi, log10
+
+# 系统参数定义
+class parameters():
+    def __init__(self):
+        self.n_links = 4 
+        self.field_length = 100
+        self.shortest_directLink_length = 2
+        self.longest_directLink_length = 25 
+        self.shortest_crossLink_length = 1
+        self.bandwidth = 5e6
+        self.carrier_f = 2.4e9
+        self.tx_height = 1.5
+        self.rx_height = 1.5
+        self.antenna_gain_decibel = 2.5
+        self.tx_power_milli_decibel = 40
+        self.tx_power = np.power(10, (self.tx_power_milli_decibel - 30) / 10)
+        self.noise_density_milli_decibel = -169
+        self.input_noise_power = np.power(10, ((self.noise_density_milli_decibel - 30) / 10)) * self.bandwidth
+        self.output_noise_power = self.input_noise_power
+        self.SNR_gap_dB = 6
+        self.SNR_gap = np.power(10, self.SNR_gap_dB / 10)
+        self.cell_length = 5
+        self.n_grids = np.round(self.field_length / self.cell_length).astype(int)
+
+# 信道路径损耗
+def compute_path_losses(paras, distances):
+    N = np.shape(distances)[-1]
+    h1, h2 = paras.tx_height, paras.rx_height
+    signal_lambda = 2.998e8 / paras.carrier_f
+    Rbp = 4 * h1 * h2 / signal_lambda
+    Lbp = abs(20 * log10(signal_lambda**2 / (8 * pi * h1 * h2)))
+    sum_term = 20 * np.log10(distances / Rbp + 1e-6)
+    Tx_over_Rx = Lbp + 6 + sum_term + (distances > Rbp).astype(int) * sum_term
+    pathlosses_db = -Tx_over_Rx + np.eye(N) * paras.antenna_gain_decibel
+    return np.power(10, pathlosses_db / 10)
+
+# 阴影衰落
+def add_shadowing(channel_losses, sigma_db=8):
+    shadow = np.random.normal(0, sigma_db, size=channel_losses.shape)
+    return channel_losses * np.power(10, shadow / 10)
+
+# 小尺度瑞利衰落
+def add_fast_fading(channel_losses):
+    fading = (np.random.randn(*channel_losses.shape)**2 + np.random.randn(*channel_losses.shape)**2) / 2
+    return channel_losses * fading
+
+# 总信道生成
+def generate_channel_matrix(paras, distances):
+    base_loss = compute_path_losses(paras, distances)
+    with_shadow = add_shadowing(base_loss)
+    with_fading = add_fast_fading(with_shadow)
+    return with_fading
+
+# 图结构构建：节点特征是 h_kk，边属性是 h_j→i
+def build_graph_with_csi_features(H, threshold=50.0, distances=None):
+    N = H.shape[0]
+    edge_index = []
+    edge_attr = []
+
+    for j in range(N):
+        for i in range(N):
+            if j == i or (distances is not None and distances[j, i] <= threshold):
+                edge_index.append([j, i])
+                edge_attr.append([H[j, i]])
+
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+    edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+    node_feat = torch.tensor(np.diag(H), dtype=torch.float).unsqueeze(1)
+    return Data(x=node_feat, edge_index=edge_index, edge_attr=edge_attr)
